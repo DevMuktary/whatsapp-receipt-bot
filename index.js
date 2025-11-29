@@ -1,4 +1,4 @@
-// index.js (FINAL & COMPLETE - WITH USER ID MIGRATION)
+// index.js (OPTIMIZED LOW-RAM VERSION)
 
 // --- Dependencies ---
 import pino from 'pino';
@@ -20,7 +20,7 @@ const PP_BUSINESS_ID = process.env.PP_BUSINESS_ID;
 const IMGBB_API_KEY = process.env.IMGBB_API_KEY;
 const RECEIPT_BASE_URL = process.env.RECEIPT_BASE_URL;
 const PORT = process.env.PORT || 3000;
-const ADMIN_NUMBERS = ['2347016370068', '2348146817448']; // NOTE: No "@c.us" for Cloud API
+const ADMIN_NUMBERS = ['2347016370068', '2348146817448'];
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
@@ -30,7 +30,8 @@ const app = express();
 app.use(express.json());
 const corsOptions = { origin: ['http://smartnaijaservices.com.ng', 'https://smartnaijaservices.com.ng'] };
 app.use(cors(corsOptions));
-let receiptBrowser;
+
+// REMOVED: let receiptBrowser; (We no longer keep a browser open globally)
 const processingUsers = new Set();
 
 // --- NEW WHATSAPP CLOUD API HELPER FUNCTIONS ---
@@ -193,7 +194,7 @@ app.post("/webhook", async (req, res) => {
     }
 });
 
-// --- REWRITTEN RECEIPT GENERATION & SENDING ---
+// --- OPTIMIZED RECEIPT GENERATION & SENDING ---
 async function generateAndSendFinalReceipt(senderId, user, receiptData, isResend = false, isEdit = false) {
     const db = getDB();
     if (!isEdit) {
@@ -227,10 +228,27 @@ async function generateAndSendFinalReceipt(senderId, user, receiptData, isResend
     });
 
     const fullUrl = `${RECEIPT_BASE_URL}template.${user.preferredTemplate || 1}.html?${urlParams.toString()}`;
-    let page;
+    
+    // --- RAM OPTIMIZATION: Launch browser only when needed ---
+    let browser;
     try {
-        page = await receiptBrowser.newPage();
-        await page.goto(fullUrl, { waitUntil: 'networkidle0' });
+        // Minimal browser args for lowest memory usage
+        browser = await puppeteer.launch({ 
+            headless: 'new',
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage', // Reduces shared memory usage
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process', // Careful with this on Windows, but great for Linux servers
+                '--disable-gpu'
+            ]
+        });
+
+        const page = await browser.newPage();
+        await page.goto(fullUrl, { waitUntil: 'networkidle0', timeout: 60000 });
 
         const caption = `Here is the receipt for ${receiptData.customerName}.`;
         if (format === 'PDF') {
@@ -252,7 +270,8 @@ async function generateAndSendFinalReceipt(senderId, user, receiptData, isResend
         await sendMessage(senderId, "Sorry, a technical error occurred while creating the receipt file.");
         await db.collection('conversations').deleteOne({ userId: senderId });
     } finally {
-        if (page && !page.isClosed()) await page.close();
+        // CRITICAL: Close browser immediately to free RAM
+        if (browser) await browser.close();
     }
 }
 
@@ -277,7 +296,7 @@ async function processIncomingMessage(msg) {
         
         let user = await db.collection('users').findOne({ userId: senderId });
         
-        // --- NEW: AUTO-MIGRATION LOGIC ---
+        // --- AUTO-MIGRATION LOGIC ---
         if (!user) {
             const oldUserIdFormat = senderId + '@c.us';
             const oldUser = await db.collection('users').findOne({ userId: oldUserIdFormat });
@@ -303,7 +322,7 @@ async function processIncomingMessage(msg) {
 
         const currentState = userSession ? userSession.state : null;
         
-        // IMPORTANT: Support commands are temporarily disabled as they require rewriting support.js
+        // IMPORTANT: Support commands are temporarily disabled
         if (isAdmin && (lowerCaseText === 'tickets' || lowerCaseText.startsWith('reply ') || lowerCaseText.startsWith('close '))) {
             await reply("Admin commands for the support system are under maintenance during this upgrade.");
             processingUsers.delete(senderId);
@@ -549,11 +568,7 @@ async function processIncomingMessage(msg) {
                     break;
 
                 // RECEIPT LOGIC & OTHERS
-                // (This part combines states from multiple original sections)
                 default:
-                    // This is a catch-all for the remaining states.
-                    // The logic for each case is copied and pasted directly from your original file,
-                    // with sendMessage/reply calls already being compatible.
                     switch(currentState) {
                         case 'receipt_customer_name':
                             const hasProducts = await db.collection('products').countDocuments({ userId: senderId }) > 0;
@@ -721,12 +736,11 @@ async function processIncomingMessage(msg) {
     }
 }
 
-// --- SERVER STARTUP ---
+// --- SERVER STARTUP (SIMPLIFIED) ---
 async function startServer() {
     await connectToDB();
-    console.log('Launching browser for receipt generation...');
-    receiptBrowser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-    console.log('Receipt browser launched successfully.');
+    console.log('DB Connected.');
+    // Removed browser pre-launch to save RAM.
     app.listen(PORT, () => console.log(`Webhook server is listening on port ${PORT}`));
 }
 
