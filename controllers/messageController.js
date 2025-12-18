@@ -1,11 +1,9 @@
-// controllers/messageController.js
 import { getDB, ObjectId } from '../db.js';
 import * as aiService from '../services/aiService.js';
 import * as whatsappService from '../services/whatsappService.js';
 import * as receiptService from '../services/receiptService.js';
 import * as userService from '../services/userService.js';
 
-// Prevent double-processing
 const processingUsers = new Set();
 
 export async function processIncomingMessage(msg) {
@@ -13,12 +11,10 @@ export async function processIncomingMessage(msg) {
     const msgType = msg.type;
     let text = '';
     
-    // Extract text from message
     if (msgType === 'text') { 
         text = msg.text.body.trim(); 
     } else if (msgType === 'image') { 
         text = msg.image.caption ? msg.image.caption.trim() : 'Image'; 
-        // Note: You can pass msg.image.id to AI if you want it to see the image later
     } else { 
         return; 
     }
@@ -31,44 +27,46 @@ export async function processIncomingMessage(msg) {
         let user = await db.collection('users').findOne({ userId: senderId });
         let userSession = await db.collection('conversations').findOne({ userId: senderId });
 
-        // --- STEP 1: RESTORE OR ONBOARDING ---
+        // --- 1. NEW USER / ONBOARDING ---
         if (!user) {
-            // Check for Restore Command
             if (text.toLowerCase().startsWith('restore')) {
                 await userService.restoreAccount(senderId, text);
-            } 
-            // Handle New User Onboarding
-            else {
+            } else {
                 await userService.handleOnboarding(senderId, text, userSession);
             }
-            return;
+            return; // Stop here, don't use AI for onboarding yet
         }
 
-        // --- STEP 2: AI PROCESSING ---
-        // Get current context (if they are building a receipt)
+        // --- 2. AI INTELLIGENCE ---
+        // Grab the data we already know (if user is in the middle of a receipt)
         const currentReceiptData = userSession?.data?.receiptData || {};
         
-        // Ask OpenAI
+        // Pass text + context to AI
         const aiResponse = await aiService.analyzeMessage(text, currentReceiptData);
-        console.log(`🤖 AI Intent: ${aiResponse.intent} | User: ${senderId}`);
+        console.log(`🤖 User: ${senderId} | Intent: ${aiResponse.intent}`);
 
-        // --- STEP 3: EXECUTE INTENT ---
+        // --- 3. EXECUTE ACTIONS ---
         switch (aiResponse.intent) {
             case 'RECEIPT':
                 const newData = aiResponse.data;
                 const missing = aiResponse.missingFields || [];
 
                 if (missing.length === 0) {
-                    // Success! Generate Receipt
-                    await whatsappService.sendMessage(senderId, "✅ details received. Generating receipt...");
+                    // ALL CLEAR -> GENERATE
+                    await whatsappService.sendMessage(senderId, "✅ Perfect. Generating your receipt now...");
                     await receiptService.generateAndSend(senderId, user, newData);
-                    // Clear session
+                    // Clear the session state
                     await db.collection('conversations').deleteOne({ userId: senderId });
                 } else {
-                    // Ask for missing info
+                    // STILL MISSING INFO -> SAVE STATE & ASK
                     await db.collection('conversations').updateOne(
                         { userId: senderId },
-                        { $set: { state: 'ai_receipt_flow', 'data.receiptData': newData } },
+                        { 
+                            $set: { 
+                                state: 'ai_receipt_flow', 
+                                'data.receiptData': newData 
+                            } 
+                        },
                         { upsert: true }
                     );
                     await whatsappService.sendMessage(senderId, aiResponse.reply);
@@ -88,8 +86,9 @@ export async function processIncomingMessage(msg) {
                 await whatsappService.sendMessage(senderId, "🚫 Action cancelled.");
                 break;
 
-            case 'MYBRAND':
-                await whatsappService.sendMessage(senderId, "To update your brand settings, please contact support or use the web dashboard (Coming Soon).");
+            case 'REJECT':
+                // Strict "No Nonsense" reply
+                await whatsappService.sendMessage(senderId, aiResponse.reply);
                 break;
 
             case 'CHAT':
@@ -99,8 +98,8 @@ export async function processIncomingMessage(msg) {
         }
 
     } catch (err) {
-        console.error("❌ Error in controller:", err);
-        await whatsappService.sendMessage(senderId, "Sorry, I encountered a temporary error. Please try again.");
+        console.error("❌ Controller Error:", err);
+        await whatsappService.sendMessage(senderId, "System error. Please try again later.");
     } finally {
         processingUsers.delete(senderId);
     }
