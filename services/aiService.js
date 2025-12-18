@@ -1,3 +1,4 @@
+// services/aiService.js
 import OpenAI from 'openai';
 
 const openai = new OpenAI({
@@ -7,38 +8,47 @@ const openai = new OpenAI({
 export async function analyzeMessage(text, currentContext = {}) {
     const currentDate = new Date().toLocaleDateString('en-NG');
     
-    // We explicitly tell the AI what the user was doing last (The "State")
+    // Check if we are already in the middle of a receipt conversation
+    const isFlowActive = currentContext && (currentContext.customerName || (currentContext.items && currentContext.items.length > 0));
+
+    // Create a clear summary of what we are waiting for
+    let waitingFor = "Nothing";
+    if (isFlowActive) {
+        if (!currentContext.customerName) waitingFor = "Customer Name";
+        else if (!currentContext.items || currentContext.items.length === 0) waitingFor = "Items";
+        else if (!currentContext.paymentMethod) waitingFor = "Payment Method";
+    }
+
     const contextDescription = JSON.stringify(currentContext || {});
-    const isMidFlow = Object.keys(currentContext).length > 0;
 
     const systemPrompt = `
-    You are a strict, professional Receipt Generator Assistant for a Nigerian business.
+    You are a smart Receipt Assistant for a Nigerian business.
     Current Date: ${currentDate}.
     
-    STRICT BEHAVIOR RULES:
-    1. DO NOT discuss sports, politics, religion, relationship advice, or general trivia.
-    2. If the user says something off-topic (e.g., "Who won the match?", "I am lonely"), reject it politely: "I can only help you generate receipts or manage your business data."
-    3. You UNDERSTAND Nigerian Pidgin, but you REPLY in clear, professional English.
+    CRITICAL CONTEXT RULES:
+    1. STATUS: You are currently waiting for: [${waitingFor}].
+    2. IF 'STATUS' is NOT "Nothing", you MUST interpret the user's short input as the answer to that missing item.
+       - Example: If waiting for "Payment Method" and user says "Transfer", do NOT reject it. Map it to 'paymentMethod'.
+       - Example: If waiting for "Items" and user says "Rice 2", map it to items.
     
+    STRICT BEHAVIOR (Only if NOT waiting for input):
+    - If the user is starting fresh and says something unrelated (e.g., "Who won the match?"), reject it with intent "REJECT".
+    - You understand Nigerian Pidgin/English but reply in clean English.
+
     TASK:
-    Analyze the user's input to extract receipt data or identify business commands.
-    
-    CONTEXT AWARENESS:
-    - The user might be answering a specific question I asked them previously.
-    - Current Known Data (Context): ${contextDescription}
-    - If I already have "customerName" and the user sends a number, assume it is the "price" or "quantity" for the item, not a random number.
-    - MERGE new info with Known Data.
+    Extract receipt data.
     
     INTENTS:
-    - "RECEIPT": User wants to create/update a receipt. Extract: customerName, items (name, price, quantity), paymentMethod.
-    - "HISTORY": User wants to see past receipts.
-    - "STATS": User wants to see sales statistics.
-    - "CANCEL": User wants to stop the current process.
-    - "CHAT": GREETINGS only (Hi, Hello). For anything else off-topic, set intent to "REJECT".
+    - "RECEIPT": Create/Update receipt.
+    - "HISTORY": View past receipts.
+    - "STATS": View sales stats.
+    - "CANCEL": Stop current action.
+    - "REJECT": Off-topic nonsense (ONLY if not waiting for input).
+    - "CHAT": Greetings only.
     
     OUTPUT JSON FORMAT:
     {
-      "intent": "RECEIPT" | "HISTORY" | "STATS" | "CANCEL" | "CHAT" | "REJECT",
+      "intent": "RECEIPT" | "HISTORY" | "STATS" | "CANCEL" | "REJECT" | "CHAT",
       "data": { 
         "customerName": "String", 
         "items": [ { "name": "String", "price": Number, "quantity": Number } ], 
@@ -48,9 +58,9 @@ export async function analyzeMessage(text, currentContext = {}) {
       "reply": "String message to user"
     }
     
-    REPLY LOGIC:
-    - If "RECEIPT" and fields are missing: "reply" should ask SPECIFICALLY for the missing field. (e.g., "What is the price for the bag?").
-    - If "REJECT": "reply" should be "I am designed only for business receipts. Please tell me what you sold."
+    REPLY GUIDELINES:
+    - If missing fields: Ask for the NEXT missing field politely.
+    - If user provides "Rice 2 3000", understand it as: Name=Rice, Qty=2, UnitPrice=3000.
     `;
 
     try {
@@ -59,20 +69,19 @@ export async function analyzeMessage(text, currentContext = {}) {
                 { role: "system", content: systemPrompt },
                 { role: "user", content: text }
             ],
-            model: "gpt-4o-mini", // Fast and cost-effective
+            model: "gpt-4o-mini",
             response_format: { type: "json_object" },
-            temperature: 0.1, // Very low temperature = strict, less creative
+            temperature: 0.1, 
         });
 
         return JSON.parse(completion.choices[0].message.content);
     } catch (error) {
         console.error("OpenAI Error:", error);
-        // Fail-safe response
         return { 
             intent: "CHAT", 
             data: currentContext, 
             missingFields: [], 
-            reply: "I'm having trouble connecting to the server. Please try again." 
+            reply: "Network glitch. Please say that again." 
         };
     }
 }
