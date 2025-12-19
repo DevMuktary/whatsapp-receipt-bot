@@ -9,7 +9,7 @@ export async function sendMainMenu(to) {
         type: "list",
         header: {
             type: "text",
-            text: "🤖 *Smart Assistant Menu*"
+            text: "🤖 Smart Assistant Menu" // <--- REMOVED MARKDOWN (*) HERE
         },
         body: {
             text: "How can I help you manage your business today?"
