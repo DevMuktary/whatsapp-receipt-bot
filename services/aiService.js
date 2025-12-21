@@ -1,4 +1,3 @@
-// services/aiService.js
 import OpenAI from 'openai';
 
 const openai = new OpenAI({
@@ -6,7 +5,7 @@ const openai = new OpenAI({
 });
 
 export async function analyzeMessage(text, currentContext = {}) {
-    // 1. DETERMINE CURRENT STATE (For Prompt Context Only)
+    // 1. DETERMINE CURRENT STATE
     let currentState = "IDLE";
     if (currentContext) {
         if (!currentContext.customerName) currentState = "AWAITING_CUSTOMER_NAME";
@@ -17,33 +16,35 @@ export async function analyzeMessage(text, currentContext = {}) {
 
     const contextDescription = JSON.stringify(currentContext || {});
 
-    // 2. STRICT SYSTEM PROMPT
+    // 2. SYSTEM PROMPT
     const systemPrompt = `
-    You are a Data Extraction Engine. You are NOT a chat assistant.
+    You are a Data Extraction Engine.
     
     CURRENT STATE: ${currentState}
     EXISTING DATA: ${contextDescription}
     
-    RULES:
-    1. EXTRACT data from the user's input based on the Current State.
-    2. MERGE with Existing Data.
-    3. IF input is "Cancel", "Reset", "Stop" -> Intent = "CANCEL".
-    4. IF input is "Hi", "Menu" (and State is IDLE) -> Intent = "CHAT".
-    5. IF input is unrelated to the task (e.g. sports) -> Intent = "REJECT".
-    6. IF STATE IS COMPLETE: Do not extract new receipt data. Only listen for "Cancel" or "Chat".
+    STRICT RULES:
+    1. IF input is "New Receipt", "Create Receipt", "Start", or "CMD_RECEIPT":
+       -> Intent = "RECEIPT"
+       -> (Do not extract data, just set intent).
     
-    DATA FORMATTING:
-    - items: Must be an array of objects { name, price, quantity }.
-    - numbers: Convert text numbers to real numbers (e.g. "2k" -> 2000).
+    2. IF input is "Cancel", "Reset", "Stop":
+       -> Intent = "CANCEL"
+    
+    3. IF input is "Hi", "Hello", "Menu":
+       -> Intent = "CHAT"
+    
+    4. EXTRACT data based on State (Name -> Items -> Payment).
+       - Items: Must be [{ name, price, quantity }].
+       - Numbers: Convert "2k" to 2000.
+    
+    5. IF input is totally unrelated (e.g. sports) AND State is NOT IDLE:
+       -> Intent = "REJECT"
     
     OUTPUT JSON:
     {
       "intent": "RECEIPT" | "HISTORY" | "STATS" | "CANCEL" | "REJECT" | "CHAT",
-      "data": { 
-        "customerName": "String", 
-        "items": [ { "name": "String", "price": Number, "quantity": Number } ], 
-        "paymentMethod": "String" 
-      }
+      "data": { ... }
     }
     `;
 
@@ -60,16 +61,14 @@ export async function analyzeMessage(text, currentContext = {}) {
 
         const aiResult = JSON.parse(completion.choices[0].message.content);
         
-        // --- 3. LOGIC LAYER (THE FIX) ---
-        // We do not trust the AI to tell us what is missing. We check ourselves.
-        
+        // --- 3. LOGIC LAYER ---
         let finalIntent = aiResult.intent;
         let finalData = aiResult.data || {};
         
-        // Merge with previous context if the AI didn't return everything
+        // Merge data
         finalData = { ...currentContext, ...finalData };
         
-        // Explicitly Calculate Missing Fields
+        // Calculate Missing Fields
         const missingFields = [];
         if (finalIntent === 'RECEIPT' || finalIntent === 'CHAT') {
             if (!finalData.customerName) missingFields.push("customerName");
@@ -77,19 +76,20 @@ export async function analyzeMessage(text, currentContext = {}) {
             else if (!finalData.paymentMethod) missingFields.push("paymentMethod");
         }
 
-        // Generate Strict Reply based on Missing Fields
+        // Generate Strict Reply
         let reply = "";
+        
         if (finalIntent === 'CANCEL') {
             reply = "🚫 Receipt cancelled.";
         } else if (finalIntent === 'REJECT') {
-            reply = "I am a receipt tool. Please enter the required details.";
+            reply = "Invalid input. Please enter the required details.";
         } else if (finalIntent === 'HISTORY' || finalIntent === 'STATS') {
-             // handled by controller
+             // Handled by controller
         } else {
-            // Receipt Flow Replies
+            // Receipt Flow
             if (missingFields.includes("customerName")) {
                 reply = "Enter Customer Name.";
-                finalIntent = "RECEIPT"; // Force intent
+                finalIntent = "RECEIPT"; 
             } else if (missingFields.includes("items")) {
                 reply = "Enter Items (Name Price Qty).";
                 finalIntent = "RECEIPT";
@@ -104,7 +104,7 @@ export async function analyzeMessage(text, currentContext = {}) {
         return {
             intent: finalIntent,
             data: finalData,
-            missingFields: missingFields, // Controller needs this array!
+            missingFields: missingFields,
             reply: reply
         };
 
