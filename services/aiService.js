@@ -1,4 +1,3 @@
-// services/aiService.js
 import OpenAI from 'openai';
 
 const openai = new OpenAI({
@@ -6,8 +5,8 @@ const openai = new OpenAI({
 });
 
 export async function analyzeMessage(text, currentContext = {}) {
-    // 1. DETERMINE THE CURRENT STATE PROGRAMMATICALLY
-    // We do this BEFORE sending to AI so we can force the AI to focus on ONE task.
+    // 1. DETERMINE STATE
+    // We calculate this first to guide the AI rigidly.
     let currentState = "IDLE";
     let missingField = "None";
 
@@ -23,67 +22,61 @@ export async function analyzeMessage(text, currentContext = {}) {
             missingField = "Payment Method";
         } else {
             currentState = "COMPLETE";
+            missingField = "None (Receipt Ready)";
         }
     }
 
     const contextDescription = JSON.stringify(currentContext || {});
 
-    // 2. THE STRICT SYSTEM PROMPT
+    // 2. STRICT SYSTEM PROMPT
     const systemPrompt = `
-    You are a Data Entry Bot for a Receipt Generator. You are NOT a chat assistant.
+    You are a strictly logical Data Entry Bot. You are NOT a chat assistant.
     
     CURRENT STATE: ${currentState}
-    MISSING DATA: ${missingField}
     EXISTING DATA: ${contextDescription}
     
-    YOUR ONLY GOAL:
-    Extract the specific "${missingField}" from the user's text.
+    GLOBAL PRIORITY RULE (CANCEL/RESET):
+    - If user says "Cancel", "Reset", "Start over", "Stop", or "Clear":
+      -> Intent = "CANCEL"
+      -> Reply = "Receipt cancelled."
+      -> Ignore all other text in the message.
+
+    STATE-SPECIFIC INSTRUCTIONS:
     
-    STRICT RULES FOR EACH STATE:
-    
-    1. STATE: IDLE (No active receipt)
-       - If user says "Hi", "Hello", "Ai", "Menu": Intent = "CHAT". Reply = "Ready. Please enter the Customer Name."
-       - If user provides a name immediately (e.g. "Receipt for Mukhtar"): Intent = "RECEIPT". Extract "customerName": "Mukhtar".
-       - If user says "History" or "Stats": Intent = "HISTORY" / "STATS".
-    
+    1. STATE: IDLE
+       - If user says "Hi", "Hello", "Menu": Intent="CHAT". Reply="Ready. Enter Customer Name."
+       - If user starts a receipt (e.g. "Receipt for Musa"): Extract "customerName". Intent="RECEIPT".
+       - If user says "History" or "Stats": Intent="HISTORY" / "STATS".
+
     2. STATE: AWAITING_CUSTOMER_NAME
-       - The User's input IS the name.
-       - Input: "Mukhtar" -> Data: { "customerName": "Mukhtar" }
-       - Input: "It is Mr. John" -> Data: { "customerName": "Mr. John" }
-       - REJECT if user asks a question like "How does this work?".
-    
+       - The entire input is the Name.
+       - Extract: "customerName".
+
     3. STATE: AWAITING_ITEMS
-       - The User's input IS the list of items.
-       - Input: "Rice 2 3000" -> Data: items: [{ name: "Rice", quantity: 2, price: 3000 }]
-       - Input: "Semovita, 5000" -> Data: items: [{ name: "Semovita", quantity: 1, price: 5000 }]
-       - DO NOT ask "What would you like to buy?". Just process the data.
-    
+       - Extract ALL items from the text.
+       - CRITICAL: Users may list multiple items (e.g., "Rice 2 4000, Beans 5000").
+       - CRITICAL: "price" and "quantity" MUST be Numbers. Remove currency symbols or text.
+       - Structure: items: [{ name: "String", price: Number, quantity: Number }]
+
     4. STATE: AWAITING_PAYMENT_METHOD
-       - The User's input IS the payment type.
-       - Input: "Transfer" -> Data: { "paymentMethod": "Transfer" }
-       - Input: "Cash" -> Data: { "paymentMethod": "Cash" }
-    
-    GENERAL RULES:
-    - IGNORE all pleasantries.
-    - NEVER say "Thank you" or "How can I help".
-    - IF input is unrelated to the Current State (e.g., discussing sports), Intent = "REJECT".
+       - Extract the method (e.g., Cash, Transfer, POS).
+
+    5. STATE: COMPLETE
+       - The receipt is already finished. 
+       - DO NOT extract any new Name, Items, or Payment.
+       - If input is "Cancel" -> Intent="CANCEL".
+       - If input is irrelevant -> Intent="CHAT" (Reply: "Receipt is ready. Check above.").
     
     OUTPUT JSON FORMAT:
     {
       "intent": "RECEIPT" | "HISTORY" | "STATS" | "CANCEL" | "REJECT" | "CHAT",
       "data": { 
-        "customerName": "String (only if extracted)", 
+        "customerName": "String", 
         "items": [ { "name": "String", "price": Number, "quantity": Number } ], 
         "paymentMethod": "String" 
       },
       "reply": "String (Short instruction for the NEXT step)"
     }
-    
-    REPLY TEMPLATES (Use these exactly):
-    - If IDLE: "Enter Customer Name."
-    - If Name Saved: "Enter Items (Name Qty Price)."
-    - If Items Saved: "Enter Payment Method."
-    - If REJECT: "Invalid input. Waiting for [MISSING_FIELD]."
     `;
 
     try {
@@ -94,18 +87,20 @@ export async function analyzeMessage(text, currentContext = {}) {
             ],
             model: "gpt-4o-mini",
             response_format: { type: "json_object" },
-            temperature: 0.0, // Zero temperature for maximum determinism
+            temperature: 0.0, // Zero temp = No creativity, strict logic
         });
 
         return JSON.parse(completion.choices[0].message.content);
+
     } catch (error) {
         console.error("OpenAI Error:", error);
-        // Fallback for safety
+        
+        // RULE 5: Consistent Response Structure for Errors
         return { 
-            intent: "RECEIPT", 
+            intent: "CHAT", 
             data: currentContext, 
-            missingFields: [], 
-            reply: "System error. Please re-enter the last detail." 
+            // We return the context so data isn't lost on error
+            reply: "System error. Please re-enter that detail." 
         };
     }
 }
