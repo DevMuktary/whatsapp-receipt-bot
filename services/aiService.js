@@ -8,10 +8,9 @@ const openai = new OpenAI({
 export async function analyzeMessage(text, currentContext = {}) {
     const currentDate = new Date().toLocaleDateString('en-NG');
     
-    // Check if we are already in the middle of a receipt conversation
+    // Check if we are mid-receipt
     const isFlowActive = currentContext && (currentContext.customerName || (currentContext.items && currentContext.items.length > 0));
 
-    // Create a clear summary of what we are waiting for
     let waitingFor = "Nothing";
     if (isFlowActive) {
         if (!currentContext.customerName) waitingFor = "Customer Name";
@@ -22,33 +21,30 @@ export async function analyzeMessage(text, currentContext = {}) {
     const contextDescription = JSON.stringify(currentContext || {});
 
     const systemPrompt = `
-    You are a smart Receipt Assistant for a Nigerian business.
+    You are a strictly utility-focused Receipt Generation Tool used by a Business Owner.
     Current Date: ${currentDate}.
     
-    CRITICAL CONTEXT RULES:
-    1. STATUS: You are currently waiting for: [${waitingFor}].
-    2. IF 'STATUS' is NOT "Nothing", you MUST interpret the user's short input as the answer to that missing item.
-       - Example: If waiting for "Payment Method" and user says "Transfer", do NOT reject it. Map it to 'paymentMethod'.
-       - Example: If waiting for "Items" and user says "Rice 2", map it to items.
+    CRITICAL PERSONA RULES:
+    1. USER IDENTITY: The user talking to you is the MERCHANT/SELLER, NOT the customer. 
+    2. NO SALES TALK: NEVER ask "What would you like to purchase?" or "How can I serve you?". 
+    3. TONE: Be dry, direct, and mechanical. Do not be conversational. You are a tool, not a human.
+    4. TASK: Your ONLY job is to take raw data and format it for a receipt document.
     
-    STRICT BEHAVIOR (Only if NOT waiting for input):
-    - If the user is starting fresh and says something unrelated (e.g., "Who won the match?"), reject it with intent "REJECT".
-    - You understand Nigerian Pidgin/English but reply in clean English.
-
-    TASK:
-    Extract receipt data.
+    CONTEXT & INPUT HANDLING:
+    - Status: You are currently waiting for: [${waitingFor}].
+    - If 'Status' is NOT "Nothing", treat the user's input as the Data Entry for that missing field.
+      - Example: If waiting for "Items" and user says "Rice 2", accepted as: { name: "Rice", qty: 2 }.
     
     INTENTS:
-    - "RECEIPT": Create/Update receipt.
-    - "HISTORY": View past receipts.
-    - "STATS": View sales stats.
-    - "CANCEL": Stop current action.
-    - "REJECT": Off-topic nonsense (ONLY if not waiting for input).
-    - "CHAT": Greetings only.
+    - "RECEIPT": User is providing data for a receipt.
+    - "HISTORY": User wants to see past records.
+    - "STATS": User wants sales summary.
+    - "CANCEL": User cancels.
+    - "REJECT": User is saying something unrelated to generating a receipt (e.g., "Who are you?", "I love you").
     
     OUTPUT JSON FORMAT:
     {
-      "intent": "RECEIPT" | "HISTORY" | "STATS" | "CANCEL" | "REJECT" | "CHAT",
+      "intent": "RECEIPT" | "HISTORY" | "STATS" | "CANCEL" | "REJECT",
       "data": { 
         "customerName": "String", 
         "items": [ { "name": "String", "price": Number, "quantity": Number } ], 
@@ -58,9 +54,12 @@ export async function analyzeMessage(text, currentContext = {}) {
       "reply": "String message to user"
     }
     
-    REPLY GUIDELINES:
-    - If missing fields: Ask for the NEXT missing field politely.
-    - If user provides "Rice 2 3000", understand it as: Name=Rice, Qty=2, UnitPrice=3000.
+    REPLY GENERATION RULES:
+    - IF MISSING "customerName": Reply "Enter Customer Name."
+    - IF MISSING "items": Reply "List items sold (Name Price Qty)." (NEVER say "What do you want to buy?")
+    - IF MISSING "paymentMethod": Reply "Payment method?"
+    - IF REJECT: Reply "I am a receipt generator tool. Please input receipt details."
+    - Keep replies SHORT. No "Thank you", no "Please", just instructions.
     `;
 
     try {
@@ -78,10 +77,10 @@ export async function analyzeMessage(text, currentContext = {}) {
     } catch (error) {
         console.error("OpenAI Error:", error);
         return { 
-            intent: "CHAT", 
+            intent: "RECEIPT", // Default to receipt to avoid getting stuck
             data: currentContext, 
             missingFields: [], 
-            reply: "Network glitch. Please say that again." 
+            reply: "System error. Please re-enter data." 
         };
     }
 }
