@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-receipt-bot-baileys",
-  "version": "1.1.0",
-  "description": "A WhatsApp bot for generating receipts, using the official WhatsApp Cloud API, Puppeteer, and OpenAI.",
+  "version": "1.0.0",
+  "description": "A WhatsApp bot for generating receipts, using the official WhatsApp Cloud API and Puppeteer.",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -19,7 +19,6 @@
     "express": "^4.19.2",
     "form-data": "^4.0.0",
     "mongodb": "^6.7.0",
-    "openai": "^4.28.0",
     "pino": "^9.2.0",
     "puppeteer": "^22.12.1"
   }
