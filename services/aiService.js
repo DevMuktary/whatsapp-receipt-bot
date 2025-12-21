@@ -6,60 +6,84 @@ const openai = new OpenAI({
 });
 
 export async function analyzeMessage(text, currentContext = {}) {
-    const currentDate = new Date().toLocaleDateString('en-NG');
-    
-    // Check if we are mid-receipt
-    const isFlowActive = currentContext && (currentContext.customerName || (currentContext.items && currentContext.items.length > 0));
+    // 1. DETERMINE THE CURRENT STATE PROGRAMMATICALLY
+    // We do this BEFORE sending to AI so we can force the AI to focus on ONE task.
+    let currentState = "IDLE";
+    let missingField = "None";
 
-    let waitingFor = "Nothing";
-    if (isFlowActive) {
-        if (!currentContext.customerName) waitingFor = "Customer Name";
-        else if (!currentContext.items || currentContext.items.length === 0) waitingFor = "Items";
-        else if (!currentContext.paymentMethod) waitingFor = "Payment Method";
+    if (currentContext && Object.keys(currentContext).length > 0) {
+        if (!currentContext.customerName) {
+            currentState = "AWAITING_CUSTOMER_NAME";
+            missingField = "Customer Name";
+        } else if (!currentContext.items || currentContext.items.length === 0) {
+            currentState = "AWAITING_ITEMS";
+            missingField = "Items (Name, Price, Qty)";
+        } else if (!currentContext.paymentMethod) {
+            currentState = "AWAITING_PAYMENT_METHOD";
+            missingField = "Payment Method";
+        } else {
+            currentState = "COMPLETE";
+        }
     }
 
     const contextDescription = JSON.stringify(currentContext || {});
 
+    // 2. THE STRICT SYSTEM PROMPT
     const systemPrompt = `
-    You are a strictly utility-focused Receipt Generation Tool used by a Business Owner.
-    Current Date: ${currentDate}.
+    You are a Data Entry Bot for a Receipt Generator. You are NOT a chat assistant.
     
-    CRITICAL PERSONA RULES:
-    1. USER IDENTITY: The user talking to you is the MERCHANT/SELLER, NOT the customer. 
-    2. NO SALES TALK: NEVER ask "What would you like to purchase?" or "How can I serve you?". 
-    3. TONE: Be dry, direct, and mechanical. Do not be conversational. You are a tool, not a human.
-    4. TASK: Your ONLY job is to take raw data and format it for a receipt document.
+    CURRENT STATE: ${currentState}
+    MISSING DATA: ${missingField}
+    EXISTING DATA: ${contextDescription}
     
-    CONTEXT & INPUT HANDLING:
-    - Status: You are currently waiting for: [${waitingFor}].
-    - If 'Status' is NOT "Nothing", treat the user's input as the Data Entry for that missing field.
-      - Example: If waiting for "Items" and user says "Rice 2", accepted as: { name: "Rice", qty: 2 }.
+    YOUR ONLY GOAL:
+    Extract the specific "${missingField}" from the user's text.
     
-    INTENTS:
-    - "RECEIPT": User is providing data for a receipt.
-    - "HISTORY": User wants to see past records.
-    - "STATS": User wants sales summary.
-    - "CANCEL": User cancels.
-    - "REJECT": User is saying something unrelated to generating a receipt (e.g., "Who are you?", "I love you").
+    STRICT RULES FOR EACH STATE:
+    
+    1. STATE: IDLE (No active receipt)
+       - If user says "Hi", "Hello", "Ai", "Menu": Intent = "CHAT". Reply = "Ready. Please enter the Customer Name."
+       - If user provides a name immediately (e.g. "Receipt for Mukhtar"): Intent = "RECEIPT". Extract "customerName": "Mukhtar".
+       - If user says "History" or "Stats": Intent = "HISTORY" / "STATS".
+    
+    2. STATE: AWAITING_CUSTOMER_NAME
+       - The User's input IS the name.
+       - Input: "Mukhtar" -> Data: { "customerName": "Mukhtar" }
+       - Input: "It is Mr. John" -> Data: { "customerName": "Mr. John" }
+       - REJECT if user asks a question like "How does this work?".
+    
+    3. STATE: AWAITING_ITEMS
+       - The User's input IS the list of items.
+       - Input: "Rice 2 3000" -> Data: items: [{ name: "Rice", quantity: 2, price: 3000 }]
+       - Input: "Semovita, 5000" -> Data: items: [{ name: "Semovita", quantity: 1, price: 5000 }]
+       - DO NOT ask "What would you like to buy?". Just process the data.
+    
+    4. STATE: AWAITING_PAYMENT_METHOD
+       - The User's input IS the payment type.
+       - Input: "Transfer" -> Data: { "paymentMethod": "Transfer" }
+       - Input: "Cash" -> Data: { "paymentMethod": "Cash" }
+    
+    GENERAL RULES:
+    - IGNORE all pleasantries.
+    - NEVER say "Thank you" or "How can I help".
+    - IF input is unrelated to the Current State (e.g., discussing sports), Intent = "REJECT".
     
     OUTPUT JSON FORMAT:
     {
-      "intent": "RECEIPT" | "HISTORY" | "STATS" | "CANCEL" | "REJECT",
+      "intent": "RECEIPT" | "HISTORY" | "STATS" | "CANCEL" | "REJECT" | "CHAT",
       "data": { 
-        "customerName": "String", 
+        "customerName": "String (only if extracted)", 
         "items": [ { "name": "String", "price": Number, "quantity": Number } ], 
         "paymentMethod": "String" 
       },
-      "missingFields": ["list", "of", "missing", "fields"], 
-      "reply": "String message to user"
+      "reply": "String (Short instruction for the NEXT step)"
     }
     
-    REPLY GENERATION RULES:
-    - IF MISSING "customerName": Reply "Enter Customer Name."
-    - IF MISSING "items": Reply "List items sold (Name Price Qty)." (NEVER say "What do you want to buy?")
-    - IF MISSING "paymentMethod": Reply "Payment method?"
-    - IF REJECT: Reply "I am a receipt generator tool. Please input receipt details."
-    - Keep replies SHORT. No "Thank you", no "Please", just instructions.
+    REPLY TEMPLATES (Use these exactly):
+    - If IDLE: "Enter Customer Name."
+    - If Name Saved: "Enter Items (Name Qty Price)."
+    - If Items Saved: "Enter Payment Method."
+    - If REJECT: "Invalid input. Waiting for [MISSING_FIELD]."
     `;
 
     try {
@@ -70,17 +94,18 @@ export async function analyzeMessage(text, currentContext = {}) {
             ],
             model: "gpt-4o-mini",
             response_format: { type: "json_object" },
-            temperature: 0.1, 
+            temperature: 0.0, // Zero temperature for maximum determinism
         });
 
         return JSON.parse(completion.choices[0].message.content);
     } catch (error) {
         console.error("OpenAI Error:", error);
+        // Fallback for safety
         return { 
-            intent: "RECEIPT", // Default to receipt to avoid getting stuck
+            intent: "RECEIPT", 
             data: currentContext, 
             missingFields: [], 
-            reply: "System error. Please re-enter data." 
+            reply: "System error. Please re-enter the last detail." 
         };
     }
 }
